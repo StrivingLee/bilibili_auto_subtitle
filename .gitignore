@@ -1,0 +1,35 @@
+# ---- Python 基本忽略规则 ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.dist-info/
+build/
+dist/
+.cache/
+.venv/
+.env/
+.envrc
+*.log
+
+# ---- uv 专用缓存 ----
+.uv/
+.uv_cache/
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- 临时与运行产物 ----
+*.tmp
+*.bak
+*.old
+
+# ---- 项目忽略 ----
+cookie.txt
+input/
+output/
