@@ -30,6 +30,7 @@ dist/
 *.old
 
 # ---- 项目忽略 ----
+cookie.json
 cookie.txt
 input/
 output/
