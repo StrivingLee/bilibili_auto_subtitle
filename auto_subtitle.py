@@ -265,15 +265,49 @@ def get_subtitle_url(
 
     return None, []
 
+def create_clickable_link(uri: str, text: str) -> str:
+    """
+    使用 OSC 8 终端序列创建可点击的超链接。
+    
+    Args:
+        uri: 链接的目标地址 (例如 'file:///C:/path/to/file')。
+        text: 要在终端中显示的文本 (例如 'C:\\path\\to\\file')。
+
+    Returns:
+        一个特殊的字符串，在兼容的终端中会显示为超链接。
+    """
+    # OSC 8 序列格式: \x1b]8;;URI\x1b\\TEXT\x1b]8;;\x1b\\
+    # \x1b 是 ESC 字符
+    # \x1b\\ 是字符串终止符 (ST)
+    return f"\x1b]8;;{uri}\x1b\\{text}\x1b]8;;\x1b\\"
+
+def print_clickable_path(message: str, file_path: Path) -> None:
+    """
+    打印一条包含可点击文件路径的消息。
+
+    这会在终端中显示文件的可读路径，但链接到其 URI 编码版本，
+    从而解决了中文和空格路径的点击问题。
+
+    Args:
+        message: 打印在链接前的前缀消息 (例如 "文件已保存至: ")。
+        file_path: 指向文件的 Path 对象。
+    """
+    abs_path = file_path.resolve()
+    uri_target = abs_path.as_uri()
+    display_text = str(abs_path)
+    
+    clickable_output = create_clickable_link(uri_target, display_text)
+    print(f"{message}{clickable_output}")
 
 # 下载和文件处理函数
 def download_subtitle(bili_session: BiliBiliSession, sub_url: str, save_path: Path) -> Path:
     """下载字幕JSON"""
-    resp = bili_session.get(sub_url) # ★ 使用 session 对象
+    resp = bili_session.get(sub_url) # 使用 session 对象
     resp.raise_for_status()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     save_path.write_text(resp.text, encoding="utf-8")
-    print(f"💾 JSON 已保存至: {save_path.resolve()}")
+    
+    print_clickable_path("💾 JSON 已保存至 ", save_path)
     return save_path
 
 def extract_bilibili_subtitle(json_path: Path, output_path: Path):
@@ -286,7 +320,8 @@ def extract_bilibili_subtitle(json_path: Path, output_path: Path):
     lines = [item["content"] for item in data.get("body", []) if "content" in item]
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"✅ 字幕已提取完成: {output_path.resolve()}")
+    
+    print_clickable_path("✅ 字幕已提取完成 ", output_path)
 
 # ==============================================================================
 # 主函数
