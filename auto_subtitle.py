@@ -7,7 +7,7 @@ import hashlib
 import urllib.parse
 import qrcode
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, List, Any
 
 # ==============================================================================
 # BiliBiliSession: 将固定的 HEADERS 和 cookie 管理封装到 Session 类中
@@ -165,23 +165,101 @@ class BiliBiliSession:
 # ==============================================================================
 # 将业务逻辑函数与 Session 实例解耦
 # ==============================================================================
+def sanitize_filename(filename: str) -> str:
+    """去除文件名中的非法字符"""
+    return "".join(c for c in filename if c not in r'\/:*?"<>|')
 
-def get_aid_cid_and_title(bili_session: BiliBiliSession, bvid: str) -> Tuple[int, int, str]:
-    """根据BV号获取aid, cid和视频标题"""
+def get_video_info(bili_session: BiliBiliSession, bvid: str) -> Tuple[int, str, List[Dict]]:
+    """根据BV号获取aid, 视频主标题, 以及所有分P的列表"""
     url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-    resp = bili_session.get(url) # 使用 session 对象
-    resp.raise_for_status()
+    resp = bili_session.get(url)
     data = resp.json()
     
     if data["code"] != 0:
         raise RuntimeError(f"获取视频信息失败: {data.get('message', '未知错误')}")
+    
+    view_data = data["data"]
+    aid = view_data["aid"]
+    title = view_data["title"]
+    pages_list = view_data.get("pages", [])
+    
+    # ★ 升级点 2: 兼容单个视频的情况
+    # 如果没有pages列表，说明是单个视频，我们手动构建一个和多P兼容的列表结构
+    if not pages_list:
+        pages_list = [{
+            "cid": view_data["cid"],
+            "page": 1,
+            "part": title  # 单个视频的分P标题就是主标题
+        }]
 
-    aid = data["data"]["aid"]
-    cid = data["data"]["cid"]
-    title = data["data"]["title"]
-    # 去掉文件名中不允许的字符
-    title = "".join(c for c in title if c not in r'\/:*?"<>|')
-    return aid, cid, title
+    return aid, title, pages_list
+
+def process_video_part(
+    bili_session: BiliBiliSession, 
+    aid: int, 
+    page_info: Dict, 
+    main_title: str, 
+    is_collection: bool, 
+    args: argparse.Namespace,
+    json_save_dir: Path,
+    txt_save_dir: Path
+) -> Optional[List[str]]:
+    """
+    处理单个视频分P的完整流程：获取字幕、下载、提取。
+    
+    Args:
+        bili_session: Bilibili会话对象。
+        aid: 视频的 aid。
+        page_info: 单个分P的信息字典 (包含 cid, page, part)。
+        main_title: 视频的主标题。
+        is_collection: 是否为合集。
+        args: 命令行参数。
+        json_save_dir: JSON 保存目录。
+        txt_save_dir: TXT 保存目录。
+    """
+    cid = page_info["cid"]
+    page_num = page_info["page"]
+    part_title = page_info["part"]
+    
+    print("-" * 50)
+    if is_collection:
+        print(f"▶️ 正在处理 P{page_num}: {part_title}")
+    
+    sub_url, subtitle_list = get_subtitle_url(bili_session, aid, cid, args.lan)
+
+    if not sub_url:
+        print("    ❌ 该分P没有可用字幕。")
+        return None # 直接返回None，表示失败
+
+    print("    📜 可用字幕列表：")
+    for sub in subtitle_list:
+        is_selected = "https:" + sub.get("subtitle_url", "") == sub_url
+        prefix = "👉" if is_selected else "  "
+        print(f"     {prefix} {sub['lan']:<8} ({sub['lan_doc']})")
+    
+    # 智能生成文件名
+    safe_main_title = sanitize_filename(main_title)
+    safe_part_title = sanitize_filename(part_title)
+    
+    if is_collection and main_title != safe_part_title:
+        file_stem = f"P{page_num} {safe_part_title}" # 合集内文件名更简洁
+    else: # 单个视频或分P标题与主标题相同时
+        file_stem = safe_main_title
+
+    # 使用传入的目录来构建最终路径
+    json_save_path = json_save_dir / f"{file_stem}.json"
+    download_subtitle(bili_session, sub_url, json_save_path)
+
+    # 根据 --merge 参数决定是否保存单个TXT文件
+    should_save_individual_file = not (args.merge and is_collection and not args.part)
+    if should_save_individual_file:
+        txt_output_path = txt_save_dir / f"{file_stem}.txt"
+        extract_bilibili_subtitle(json_save_path, txt_output_path)
+
+    with open(json_save_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    lines = [item["content"] for item in data.get("body", []) if "content" in item]
+    return lines
 
 # WBI mixinKey 生成算法
 def get_mixin_key(img_key: str, sub_key: str) -> str:
@@ -329,10 +407,13 @@ def extract_bilibili_subtitle(json_path: Path, output_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="输入BV号，自动下载并提取B站字幕（兼容最新API）")
-    parser.add_argument("bvid", help="视频的BV号")
+    parser.add_argument("bvid", help="视频的BV号 (单个视频或合集均可)")
     parser.add_argument("-o", "--output", default="output", help="输出目录（默认 output/）")
     parser.add_argument("--json-dir", default="input", help="原始JSON保存目录（默认 input/）")
     parser.add_argument("--lan", help="字幕语言代码，例如 zh-CN, en-US, ai-zh 等")
+    parser.add_argument("-p", "--part", type=int, help="指定要提取的单个分P编号 (例如: -p 5)")
+    parser.add_argument("--merge", action="store_true", help="将多P合集的字幕合并输出到一个TXT文件中 (仅对处理整个合集时有效)"
+    )
     args = parser.parse_args()
 
     # 实例化并初始化 Session
@@ -340,34 +421,69 @@ def main():
         bili_session = BiliBiliSession()
         
         print(f"\n📄 正在获取视频信息: {args.bvid}")
-        aid, cid, title = get_aid_cid_and_title(bili_session, args.bvid)
-        print(f"   - 标题: {title}")
-        print(f"   - AID: {aid}, CID: {cid}")
+        aid, main_title, pages_list = get_video_info(bili_session, args.bvid)
 
-        sub_url, subtitle_list = get_subtitle_url(bili_session, aid, cid, args.lan)
+        # 根据 --part 参数筛选要处理的分P列表
+        target_pages_list = pages_list
+        if args.part:
+            # 从全部分P列表中查找用户指定的那一P
+            found_part = next((p for p in pages_list if p['page'] == args.part), None)
+            if found_part:
+                target_pages_list = [found_part] # 将目标列表缩减为仅含指定的那一P
+                print(f"✅ 已指定提取 P{args.part}。")
+            else:
+                print(f"❌ 错误: 分P号 {args.part} 不存在。该视频共有 {len(pages_list)} 个分P。")
+                return # 找不到指定分P，直接退出
 
-        if not sub_url:
-            print("❌ 该视频没有可用字幕。")
-            # 没有字幕时也列出可用列表
-            if subtitle_list:
-                print("但是找到了以下语言选项:")
-                for sub in subtitle_list:
-                    print(f"  - {sub['lan']:<8} ({sub['lan_doc']})")
-            return
-
-        print("\n📜 可用字幕列表：")
-        for sub in subtitle_list:
-            is_selected = "https:" + sub.get("subtitle_url", "") == sub_url
-            prefix = "👉" if is_selected else "  "
-            print(f" {prefix} {sub['lan']:<8} ({sub['lan_doc']})")
-
-        # 使用 pathlib 进行路径管理
+        is_collection = len(pages_list) > 1
+        # 根据是否为合集，决定最终的输出目录
         base_dir = Path(__file__).resolve().parent
-        json_save_path = base_dir / args.json_dir / f"{title}.json"
-        txt_output_path = base_dir / args.output / f"{title}.txt"
+        safe_main_title = sanitize_filename(main_title)
+        # 默认输出目录为根目录
+        json_output_dir = base_dir / args.json_dir
+        txt_output_dir = base_dir / args.output
+        if is_collection and not args.part: # 仅在处理整个合集且不合并时显示此信息并创建文件夹
+            json_output_dir = json_output_dir / safe_main_title
+            if not args.merge:
+                txt_output_dir = txt_output_dir / safe_main_title
+            print(f"合集标题: {main_title}")
+            print(f"合集包含 {len(pages_list)} 个分P。")
+        elif is_collection and args.part: # 处理合集的单个P或合并
+            print(f"合集标题: {main_title}")
+        else:
+            print(f"视频标题: {main_title}")
 
-        download_subtitle(bili_session, sub_url, json_save_path)
-        extract_bilibili_subtitle(json_save_path, txt_output_path)
+        all_subtitle_lines = []
+
+        for page_info in target_pages_list:
+            returned_lines = process_video_part(
+                bili_session, aid, page_info, main_title, is_collection, args,
+                json_output_dir, txt_output_dir
+            )
+            
+            # 将返回的字幕行和分隔符添加到主列表中
+            if returned_lines:
+                part_title = page_info["part"]
+                page_num = page_info["page"]
+                separator = f"\n\n--- P{page_num} {part_title} ---\n\n"
+                
+                if all_subtitle_lines: # 避免在文件开头添加分隔符
+                    all_subtitle_lines.append(separator)
+                
+                all_subtitle_lines.extend(returned_lines)
+            
+            time.sleep(1)
+
+        # 循环结束后，根据 --merge 参数执行合并写入操作
+        if args.merge and is_collection and not args.part and all_subtitle_lines:
+            merged_filename = f"{safe_main_title} (完整字幕).txt"
+            merged_output_path = txt_output_dir / merged_filename
+            
+            merged_output_path.parent.mkdir(parents=True, exist_ok=True)
+            merged_output_path.write_text("".join(all_subtitle_lines), encoding="utf-8")
+            
+            print("-" * 50)
+            print_clickable_path("✅ 所有分P字幕已成功合并至: ", merged_output_path)
 
     except (requests.RequestException, RuntimeError, KeyError) as e:
         print(f"\n💥 程序运行出错: {e}")
