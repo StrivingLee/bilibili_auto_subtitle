@@ -101,11 +101,16 @@ class BiliBiliSession:
         qr_url = data["url"]
 
         # 2. 在终端显示二维码
-        qr = qrcode.QRCode()
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=1,   # 原本是 10，改成 1
+            border=1      # 原本是 4，改成 1
+        )
         qr.add_data(qr_url)
         qr.make(fit=True)
         # 使用invert参数让二维码在深色背景终端更好看
-        qr.print_tty(invert=True) # 使用 tty 模式输出，尺寸更适合终端
+        qr.print_ascii(invert=True) # 使用 tty 模式输出，尺寸更适合终端
         print("请使用Bilibili手机客户端扫描上方二维码登录...")
 
         # 3. 轮询扫码状态
